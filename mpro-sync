@@ -1,0 +1,900 @@
+#!/bin/bash
+
+# MPro Branch Synchronization Script
+# Usage: mpro-sync <branch-pattern> [options]
+# This script changes branches across all MPro repositories using pattern matching,
+# fetches/pulls updates, and optionally installs dependencies.
+
+set -e  # Exit on error
+
+# Script configuration
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
+CONFIG_FILE="$HOME/.mpro-sync.conf"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Default options
+BRANCH_PATTERN=""
+INSTALL_DEPS=false
+CREATE_ALIAS=false
+CONFIGURE=false
+SHOW_STATUS=false
+
+# Repository configuration (will be loaded from config file)
+declare -A REPO_PATHS
+declare -A REPO_ENABLED
+declare -a REPO_ORDER
+
+# Load configuration file
+load_config() {
+  if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+    return 0
+  fi
+  return 1
+}
+
+# Create default configuration
+create_default_config() {
+  cat > "$CONFIG_FILE" << 'EOF'
+# MPro Sync Configuration File
+# This file defines the repositories to synchronize
+
+# Repository paths (key=name, value=absolute path)
+REPO_PATHS["lib-domain"]="$HOME/mpro/appmutuactivostech-lib-domain-patrimonial"
+REPO_PATHS["api-patrimonial"]="$HOME/mpro/appmutuactivostech-api-patrimonial"
+REPO_PATHS["api-mpro-bff"]="$HOME/mpro/appmutuactivostech-api-mpro-bff"
+REPO_PATHS["frontend"]="$HOME/mpro/appmutuactivostech-front-mpro"
+
+# Enable/disable repositories (true/false)
+REPO_ENABLED["lib-domain"]=true
+REPO_ENABLED["api-patrimonial"]=true
+REPO_ENABLED["api-mpro-bff"]=true
+REPO_ENABLED["frontend"]=true
+
+# Order of synchronization (space-separated list)
+REPO_ORDER=("lib-domain" "api-patrimonial" "api-mpro-bff" "frontend")
+EOF
+}
+
+# Interactive configuration
+configure_repos() {
+  echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
+  echo -e "${BLUE}║           MPro Sync - Interactive Configuration            ║${NC}"
+  echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
+  echo ""
+  echo -e "${CYAN}This will create a configuration file at: ${YELLOW}$CONFIG_FILE${NC}"
+  echo ""
+  
+  # Ask for base directory
+  local default_base="$HOME/mpro"
+  echo -e "${YELLOW}Enter the base directory where MPro repositories are located:${NC}"
+  read -p "[$default_base]: " base_dir
+  base_dir="${base_dir:-$default_base}"
+  
+  # Expand ~ to $HOME
+  base_dir="${base_dir/#\~/$HOME}"
+  
+  echo ""
+  echo -e "${CYAN}Configuring repositories...${NC}"
+  echo -e "${YELLOW}(Press Enter to accept default, or type custom path)${NC}"
+  echo ""
+  
+  # Configuration for each repository (standard MPro repos)
+  local repos=(
+    "lib-domain:Library Domain:appmutuactivostech-lib-domain-patrimonial"
+    "api-patrimonial:API Patrimonial:appmutuactivostech-api-patrimonial"
+    "api-mpro-bff:API MPro BFF:appmutuactivostech-api-mpro-bff"
+    "frontend:Frontend:appmutuactivostech-front-mpro"
+  )
+  
+  # Ask if user wants to add custom repositories
+  echo -e "${CYAN}Standard MPro repositories detected.${NC}"
+  read -p "Do you want to add custom repositories? (y/N): " add_custom
+  echo ""
+  
+  if [[ "$add_custom" =~ ^[Yy]$ ]]; then
+    echo -e "${YELLOW}Enter custom repositories (leave key empty to finish):${NC}"
+    while true; do
+      echo -e "${BLUE}▸ Custom Repository${NC}"
+      read -p "  Key (e.g., 'custom-lib', leave empty to finish): " custom_key
+      
+      if [ -z "$custom_key" ]; then
+        echo ""
+        break
+      fi
+      
+      read -p "  Display name: " custom_name
+      custom_name="${custom_name:-$custom_key}"
+      read -p "  Full path: " custom_path
+      
+      if [ -z "$custom_path" ]; then
+        echo -e "  ${RED}✗ Path cannot be empty, skipping${NC}"
+        echo ""
+        continue
+      fi
+      
+      custom_path="${custom_path/#\~/$HOME}"
+      repos+=("$custom_key:$custom_name:$custom_path")
+      echo -e "  ${GREEN}✓ Added${NC}"
+      echo ""
+    done
+  fi
+  
+  declare -A new_paths
+  declare -A new_enabled
+  declare -a new_order
+  
+  for repo_info in "${repos[@]}"; do
+    IFS=':' read -r key name default_dir <<< "$repo_info"
+    
+    # Check if it's a full path or just directory name
+    local default_path
+    if [[ "$default_dir" == /* ]]; then
+      default_path="$default_dir"
+    else
+      default_path="$base_dir/$default_dir"
+    fi
+    
+    echo -e "${BLUE}▸ ${name}${NC}"
+    
+    # Ask for path
+    read -p "  Path [$default_path]: " custom_path
+    custom_path="${custom_path:-$default_path}"
+    custom_path="${custom_path/#\~/$HOME}"
+    
+    # Ask if enabled
+    read -p "  Enable this repository? [Y/n]: " enabled
+    enabled="${enabled:-Y}"
+    
+    if [[ "$enabled" =~ ^[Yy]$ ]]; then
+      new_paths["$key"]="$custom_path"
+      new_enabled["$key"]="true"
+      new_order+=("$key")
+      echo -e "  ${GREEN}✓ Enabled${NC}"
+    else
+      new_paths["$key"]="$custom_path"
+      new_enabled["$key"]="false"
+      echo -e "  ${YELLOW}○ Disabled${NC}"
+    fi
+    echo ""
+  done
+  
+  # Write configuration file
+  cat > "$CONFIG_FILE" << EOF
+# MPro Sync Configuration File
+# Generated on $(date)
+# Edit this file to customize repository paths and settings
+
+# Repository paths (key=name, value=absolute path)
+EOF
+  
+  for key in "${!new_paths[@]}"; do
+    echo "REPO_PATHS[\"$key\"]=\"${new_paths[$key]}\"" >> "$CONFIG_FILE"
+  done
+  
+  echo "" >> "$CONFIG_FILE"
+  echo "# Enable/disable repositories (true/false)" >> "$CONFIG_FILE"
+  for key in "${!new_enabled[@]}"; do
+    echo "REPO_ENABLED[\"$key\"]=\"${new_enabled[$key]}\"" >> "$CONFIG_FILE"
+  done
+  
+  echo "" >> "$CONFIG_FILE"
+  echo "# Order of synchronization (space-separated list)" >> "$CONFIG_FILE"
+  echo "REPO_ORDER=(${new_order[@]})" >> "$CONFIG_FILE"
+  
+  echo -e "${GREEN}✅ Configuration saved to: ${YELLOW}$CONFIG_FILE${NC}"
+  echo ""
+  
+  # Validate paths
+  echo -e "${CYAN}Validating repository paths...${NC}"
+  local all_valid=true
+  for key in "${new_order[@]}"; do
+    local path="${new_paths[$key]}"
+    if [ -d "$path" ]; then
+      echo -e "  ${GREEN}✓${NC} $key: $path"
+    else
+      echo -e "  ${RED}✗${NC} $key: $path ${RED}(not found)${NC}"
+      all_valid=false
+    fi
+  done
+  
+  echo ""
+  if [ "$all_valid" = false ]; then
+    echo -e "${YELLOW}⚠️  Some repository paths don't exist yet.${NC}"
+    echo -e "${YELLOW}   You can edit the configuration later: ${CYAN}$CONFIG_FILE${NC}"
+  fi
+  echo ""
+}
+
+# Show current configuration
+show_config() {
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${RED}❌ Configuration file not found: $CONFIG_FILE${NC}"
+    echo -e "${YELLOW}Run: mpro-sync --configure${NC}"
+    return 1
+  fi
+  
+  load_config
+  
+  echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
+  echo -e "${BLUE}║              Current MPro Sync Configuration                   ║${NC}"
+  echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
+  echo ""
+  echo -e "${CYAN}Configuration file: ${YELLOW}$CONFIG_FILE${NC}"
+  echo ""
+  echo -e "${CYAN}Repositories:${NC}"
+  
+  for key in "${REPO_ORDER[@]}"; do
+    local path="${REPO_PATHS[$key]}"
+    local enabled="${REPO_ENABLED[$key]}"
+    local status="${GREEN}✓ Enabled${NC}"
+    
+    if [ "$enabled" != "true" ]; then
+      status="${YELLOW}○ Disabled${NC}"
+    fi
+    
+    local exists="${GREEN}[exists]${NC}"
+    if [ ! -d "$path" ]; then
+      exists="${RED}[not found]${NC}"
+    fi
+    
+    echo -e "  $status  ${BLUE}$key${NC}"
+    echo -e "           $path $exists"
+  done
+  
+  echo ""
+}
+
+# Show current status (branches) without switching
+show_status() {
+  if ! load_config; then
+    echo -e "${RED}❌ Configuration file not found: $CONFIG_FILE${NC}"
+    echo -e "${YELLOW}Run: mpro-sync --configure${NC}"
+    exit 1
+  fi
+  
+  echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
+  echo -e "${BLUE}║                  MPro Repositories Status                      ║${NC}"
+  echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
+  echo ""
+  
+  for key in "${REPO_ORDER[@]}"; do
+    if [ "${REPO_ENABLED[$key]}" != "true" ]; then
+      continue
+    fi
+    
+    repo="${REPO_PATHS[$key]}"
+    
+    if [ ! -d "$repo" ]; then
+      echo -e "  ${RED}✗${NC} $(printf '%-25s' "$key"): ${RED}[not found]${NC}"
+      continue
+    fi
+    
+    cd "$repo"
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+    
+    # Check if there are uncommitted changes
+    if ! git diff-index --quiet HEAD 2>/dev/null; then
+      status="${YELLOW}[modified]${NC}"
+    else
+      status=""
+    fi
+    
+    # Check if behind/ahead of origin
+    git fetch origin --quiet 2>/dev/null
+    local_commit=$(git rev-parse HEAD 2>/dev/null)
+    remote_commit=$(git rev-parse origin/$current_branch 2>/dev/null)
+    
+    if [ "$local_commit" != "$remote_commit" ] && [ -n "$remote_commit" ]; then
+      behind=$(git rev-list --count HEAD..origin/$current_branch 2>/dev/null || echo 0)
+      ahead=$(git rev-list --count origin/$current_branch..HEAD 2>/dev/null || echo 0)
+      
+      if [ "$behind" -gt 0 ]; then
+        status="$status ${CYAN}↓$behind${NC}"
+      fi
+      if [ "$ahead" -gt 0 ]; then
+        status="$status ${CYAN}↑$ahead${NC}"
+      fi
+    fi
+    
+    echo -e "  ${GREEN}✓${NC} $(printf '%-25s' "$key"): ${YELLOW}$current_branch${NC} $status"
+  done
+  
+  echo ""
+  echo -e "${CYAN}Legend: ${YELLOW}[modified]${NC} = local changes | ${CYAN}↓N${NC} = behind by N commits | ${CYAN}↑N${NC} = ahead by N commits${NC}"
+  echo ""
+  exit 0
+}
+
+# Show help menu
+show_help() {
+  echo -e "${BLUE}MPro Branch Synchronization Script${NC}"
+  echo ""
+  echo -e "${YELLOW}USAGE:${NC}"
+  echo "  mpro-sync <branch-pattern> [options]"
+  echo "  mpro-sync [options] -b <branch-pattern>"
+  echo "  mpro-sync --status"
+  echo ""
+  echo -e "${YELLOW}DESCRIPTION:${NC}"
+  echo "  Synchronizes all configured MPro repositories to branches matching the given pattern."
+  echo "  The script searches for branches that start with the pattern (e.g., 'feature/888')"
+  echo "  and automatically handles different suffixes in each repository."
+  echo ""
+  echo -e "${YELLOW}ARGUMENTS:${NC}"
+  echo "  <branch-pattern>    Branch pattern to search for (e.g., 'feature/888', 'fix/123')"
+  echo "                      Can be the first positional argument or specified with -b/--branch"
+  echo ""
+  echo -e "${YELLOW}OPTIONS:${NC}"
+  echo "  -b, --branch <pattern>     Specify branch pattern explicitly"
+  echo "  -d, --dependencies         Install/update dependencies (default: skip)"
+  echo "  -i, --install              Create bash alias 'mpro-sync' for this script"
+  echo "  -c, --configure            Configure repository paths interactively"
+  echo "  -s, --show-config          Show current configuration"
+  echo "      --status               Show current branch status for all repositories"
+  echo "  -h, --help                 Show this help message"
+  echo ""
+  echo -e "${YELLOW}CONFIGURATION:${NC}"
+  echo -e "  Configuration file: ${CYAN}~/.mpro-sync.conf${NC}"
+  echo ""
+  echo "  The configuration file defines:"
+  echo "  - Repository paths (can be anywhere in your system)"
+  echo "  - Which repositories to synchronize"
+  echo "  - Order of synchronization"
+  echo ""
+  echo -e "  ${CYAN}To add custom repositories:${NC} Edit the config file or run ${YELLOW}mpro-sync --configure${NC}"
+  echo ""
+  echo -e "${YELLOW}EXAMPLES:${NC}"
+  echo -e "  ${CYAN}# First time setup${NC}"
+  echo "  mpro-sync --configure                 # Configure repository paths"
+  echo "  mpro-sync --install                   # Create bash alias"
+  echo ""
+  echo -e "  ${CYAN}# Daily usage${NC}"
+  echo "  mpro-sync status                      # Check current branches"
+  echo "  mpro-sync feature/888                 # Switch to feature/888* branches"
+  echo "  mpro-sync develop -d                  # Switch to develop and install dependencies"
+  echo "  mpro-sync -b fix/123 --dependencies   # Switch to fix/123* with dependencies"
+  echo ""
+  echo -e "  ${CYAN}# Configuration management${NC}"
+  echo "  mpro-sync --show-config               # View current configuration"
+  echo "  mpro-sync --configure                 # Reconfigure paths"
+  echo ""
+  echo -e "${YELLOW}SHARING WITH TEAMMATES:${NC}"
+  echo "  1. Share this script file"
+  echo "  2. Each person runs: mpro-sync --configure"
+  echo "  3. Configure their local repository paths"
+  echo "  4. Create alias: mpro-sync --install"
+  echo ""
+  exit 0
+}
+
+# Create bash alias
+create_alias() {
+  local shell_rc=""
+  local alias_name="mpro-sync"
+  
+  echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
+  echo -e "${BLUE}║                  Alias Installation                          ║${NC}"
+  echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
+  echo ""
+  
+  # Ask for custom alias name
+  echo -e "${CYAN}Enter the alias name you want to use:${NC}"
+  read -p "[$alias_name]: " custom_alias
+  alias_name="${custom_alias:-$alias_name}"
+  echo ""
+  
+  # Make script executable
+  echo -e "${CYAN}Making script executable...${NC}"
+  chmod +x "$SCRIPT_PATH"
+  echo -e "${GREEN}✓ Script is now executable${NC}"
+  echo ""
+  
+  # Detect shell configuration file
+  if [ -n "$BASH_VERSION" ]; then
+    if [ -f "$HOME/.bashrc" ]; then
+      shell_rc="$HOME/.bashrc"
+    elif [ -f "$HOME/.bash_profile" ]; then
+      shell_rc="$HOME/.bash_profile"
+    fi
+  elif [ -n "$ZSH_VERSION" ]; then
+    shell_rc="$HOME/.zshrc"
+  fi
+  
+  if [ -z "$shell_rc" ]; then
+    echo -e "${RED}❌ Could not detect shell configuration file${NC}"
+    exit 1
+  fi
+  
+  # Check if alias already exists
+  if grep -q "alias $alias_name=" "$shell_rc" 2>/dev/null; then
+    echo -e "${YELLOW}⚠️  Alias '$alias_name' already exists in $shell_rc${NC}"
+    echo -e "${BLUE}Current alias:${NC}"
+    grep "alias $alias_name=" "$shell_rc"
+    read -p "Do you want to update it? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      echo -e "${BLUE}Alias installation cancelled${NC}"
+      exit 0
+    fi
+    # Remove old alias
+    sed -i "/alias $alias_name=/d" "$shell_rc"
+  fi
+  
+  # Add new alias
+  echo "" >> "$shell_rc"
+  echo "# MPro Sync Script Alias" >> "$shell_rc"
+  echo "alias $alias_name='$SCRIPT_PATH'" >> "$shell_rc"
+  
+  echo -e "${GREEN}✅ Alias created successfully!${NC}"
+  echo ""
+  echo -e "${BLUE}Added to: ${YELLOW}$shell_rc${NC}"
+  echo -e "${CYAN}Alias name: ${YELLOW}$alias_name${NC}"
+  echo -e "${CYAN}Command: ${YELLOW}$SCRIPT_PATH${NC}"
+  echo ""
+  echo -e "${BLUE}Reload your shell or run:${NC} ${YELLOW}source $shell_rc${NC}"
+  echo ""
+  exit 0
+}
+
+# Find matching branch in repository
+find_branch() {
+  local repo_path="$1"
+  local pattern="$2"
+  local repo_key="$3"  # Repository key for better error messages
+  
+  cd "$repo_path"
+  git fetch origin --quiet
+  
+  # Try exact match first
+  if git show-ref --verify --quiet "refs/heads/$pattern" || \
+     git show-ref --verify --quiet "refs/remotes/origin/$pattern"; then
+    echo "$pattern"
+    return 0
+  fi
+  
+  # Search for branches starting with the pattern
+  local branches=$(git branch -a | grep -E "^\s*(remotes/origin/)?${pattern}" | sed 's/^\s*//;s/^remotes\/origin\///' | sort -u)
+  
+  if [ -z "$branches" ]; then
+    return 1
+  fi
+  
+  # Check if there are multiple matches
+  local branch_count=$(echo "$branches" | wc -l)
+  if [ "$branch_count" -gt 1 ]; then
+    # Show error immediately for this repository
+    echo -e "    ${RED}✗ Multiple branches found matching '$pattern'${NC}" >&2
+    echo "" >&2
+    echo -e "${YELLOW}    Available branches in $repo_key:${NC}" >&2
+    echo "$branches" | while read -r branch; do
+      echo -e "      ${CYAN}• $branch${NC}" >&2
+    done
+    echo "" >&2
+    return 2
+  fi
+  
+  # Return single match
+  echo "$branches"
+  return 0
+}
+
+# Parse command line arguments
+POSITIONAL_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -h|--help)
+      show_help
+      ;;
+    -i|--install)
+      CREATE_ALIAS=true
+      shift
+      ;;
+    -c|--configure)
+      CONFIGURE=true
+      shift
+      ;;
+    -s|--show-config)
+      show_config
+      exit 0
+      ;;
+    --status|status)
+      SHOW_STATUS=true
+      shift
+      ;;
+    -d|--dependencies)
+      INSTALL_DEPS=true
+      shift
+      ;;
+    -b|--branch)
+      BRANCH_PATTERN="$2"
+      shift 2
+      ;;
+    -*)
+      echo -e "${RED}❌ Unknown option: $1${NC}"
+      echo "Use -h or --help for usage information"
+      exit 1
+      ;;
+    *)
+      POSITIONAL_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# Handle --configure flag
+if [ "$CONFIGURE" = true ]; then
+  configure_repos
+  exit 0
+fi
+
+# Handle --status flag
+if [ "$SHOW_STATUS" = true ]; then
+  show_status
+fi
+
+# Handle --install flag
+if [ "$CREATE_ALIAS" = true ]; then
+  create_alias
+fi
+
+# Load configuration or create default
+if ! load_config; then
+  echo -e "${YELLOW}⚠️  Configuration file not found: $CONFIG_FILE${NC}"
+  echo -e "${CYAN}Creating default configuration...${NC}"
+  echo ""
+  
+  read -p "Do you want to configure interactively? (Y/n): " -n 1 -r
+  echo ""
+  
+  if [[ $REPLY =~ ^[Yy]$ ]] || [ -z "$REPLY" ]; then
+    configure_repos
+    load_config
+  else
+    create_default_config
+    load_config
+    echo -e "${GREEN}✓ Default configuration created${NC}"
+    echo -e "${YELLOW}Edit the file to customize: ${CYAN}$CONFIG_FILE${NC}"
+    echo ""
+  fi
+fi
+
+# Build list of active repositories
+ACTIVE_REPOS=()
+for key in "${REPO_ORDER[@]}"; do
+  if [ "${REPO_ENABLED[$key]}" = "true" ]; then
+    ACTIVE_REPOS+=("$key")
+  fi
+done
+
+if [ ${#ACTIVE_REPOS[@]} -eq 0 ]; then
+  echo -e "${RED}❌ No repositories enabled in configuration${NC}"
+  echo -e "${YELLOW}Run: mpro-sync --configure${NC}"
+  exit 1
+fi
+
+# Set branch pattern from positional argument if not set by flag
+if [ -z "$BRANCH_PATTERN" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+  BRANCH_PATTERN="${POSITIONAL_ARGS[0]}"
+fi
+
+# Validation
+if [ -z "$BRANCH_PATTERN" ]; then
+  echo -e "${RED}❌ Error: Branch pattern not provided${NC}"
+  echo "Usage: mpro-sync <branch-pattern> [options]"
+  echo "Use -h or --help for more information"
+  exit 1
+fi
+
+# Process single repository (for parallel execution)
+process_repo() {
+  local key="$1"
+  local repo="$2"
+  local pattern="$3"
+  local temp_dir="$4"
+  
+  local output_file="$temp_dir/$key.output"
+  local status_file="$temp_dir/$key.status"
+  local branch_file="$temp_dir/$key.branch"
+  local error_file="$temp_dir/$key.error"
+  
+  {
+    cd "$repo"
+    
+    # Find matching branch
+    set +e
+    matched_branch=$(find_branch "$repo" "$pattern" "$key" 2>"$error_file")
+    find_status=$?
+    set -e
+    
+    # Check for multiple branches
+    if [ $find_status -eq 2 ]; then
+      echo "ERROR_MULTIPLE"
+      exit 2
+    fi
+    
+    if [ -z "$matched_branch" ] || [ $find_status -eq 1 ]; then
+      echo "ERROR_NOT_FOUND"
+      exit 1
+    fi
+    
+    # Save matched branch
+    echo "$matched_branch" > "$branch_file"
+    
+    # Checkout branch
+    if git show-ref --verify --quiet "refs/heads/$matched_branch"; then
+      git checkout "$matched_branch" >/dev/null 2>&1
+    else
+      git checkout -b "$matched_branch" "origin/$matched_branch" >/dev/null 2>&1
+    fi
+    
+    # Get commit counts before pull
+    local_commit=$(git rev-parse HEAD 2>/dev/null)
+    
+    # Pull latest changes
+    pull_output=$(git pull origin "$matched_branch" 2>&1)
+    pull_status=$?
+    
+    # Get commit counts after pull
+    new_commit=$(git rev-parse HEAD 2>/dev/null)
+    
+    # Determine what happened
+    if [ "$pull_status" -eq 0 ]; then
+      if [ "$local_commit" != "$new_commit" ]; then
+        commit_count=$(git rev-list --count $local_commit..$new_commit 2>/dev/null || echo "?")
+        echo "PULLED:$commit_count"
+      elif echo "$pull_output" | grep -q "up to date\|Already up to date"; then
+        echo "UP_TO_DATE"
+      else
+        echo "UPDATED"
+      fi
+    else
+      if echo "$pull_output" | grep -q "would be overwritten\|local changes"; then
+        echo "WARNING_LOCAL_CHANGES"
+      else
+        echo "WARNING_PULL_ISSUES"
+      fi
+    fi
+  } > "$output_file" 2>&1
+  
+  echo $? > "$status_file"
+}
+
+echo ""
+echo -e "${BLUE}╔════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║                    MPro Sync                       ║${NC}"
+echo -e "${BLUE}╚════════════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "${CYAN}Branch pattern:${NC} ${YELLOW}$BRANCH_PATTERN${NC}"
+echo -e "${CYAN}Install dependencies:${NC} ${YELLOW}$([ "$INSTALL_DEPS" = true ] && echo "Yes" || echo "No")${NC}"
+echo ""
+
+# Step 1: Checkout and fetch/pull all repositories (in parallel)
+echo -e "${BLUE}📦 Step 1: Updating repositories (parallel mode)...${NC}"
+declare -A REPO_BRANCHES
+
+# Create temporary directory for parallel execution
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
+
+# Validate all repos exist first
+for key in "${ACTIVE_REPOS[@]}"; do
+  repo="${REPO_PATHS[$key]}"
+  if [ ! -d "$repo" ]; then
+    echo -e "${RED}❌ Repository not found: $repo${NC}"
+    echo -e "${YELLOW}   Configure the correct path with: mpro-sync --configure${NC}"
+    exit 1
+  fi
+done
+
+# Launch all repository updates in parallel
+echo -e "${CYAN}Starting parallel updates...${NC}"
+for key in "${ACTIVE_REPOS[@]}"; do
+  repo="${REPO_PATHS[$key]}"
+  process_repo "$key" "$repo" "$BRANCH_PATTERN" "$TEMP_DIR" &
+done
+
+# Wait for all background jobs to complete
+wait
+
+echo ""
+
+# Process results in order
+for key in "${ACTIVE_REPOS[@]}"; do
+  repo="${REPO_PATHS[$key]}"
+  output_file="$TEMP_DIR/$key.output"
+  status_file="$TEMP_DIR/$key.status"
+  branch_file="$TEMP_DIR/$key.branch"
+  error_file="$TEMP_DIR/$key.error"
+  
+  echo -e "${YELLOW}  → $key${NC}"
+  
+  if [ ! -f "$status_file" ]; then
+    echo -e "    ${RED}✗ Processing failed${NC}"
+    
+    # Try to show error details
+    if [ -f "$error_file" ] && [ -s "$error_file" ]; then
+      echo ""
+      cat "$error_file"
+      echo ""
+    elif [ -f "$output_file" ] && [ -s "$output_file" ]; then
+      echo -e "    ${YELLOW}Details:${NC}"
+      tail -5 "$output_file" | sed 's/^/      /'
+    else
+      echo -e "    ${YELLOW}No error details available. Repo: $repo${NC}"
+    fi
+    
+    echo -e "${RED}❌ Failed to process repository: $key${NC}"
+    exit 1
+  fi
+  
+  exit_status=$(cat "$status_file")
+  result=$(cat "$output_file" 2>/dev/null | tail -1)
+  
+  # Check for errors
+  if [ "$result" = "ERROR_MULTIPLE" ]; then
+    echo -e "    ${RED}✗ Multiple branches found matching '$BRANCH_PATTERN'${NC}"
+    echo ""
+    
+    # Show error details
+    if [ -f "$error_file" ]; then
+      cat "$error_file"
+    fi
+    
+    echo ""
+    echo -e "${RED}❌ Ambiguous branch pattern!${NC}"
+    echo -e "${YELLOW}Please be more specific with your branch pattern.${NC}"
+    echo ""
+    echo -e "${CYAN}Example:${NC} If you want a specific branch, use the full name:"
+    echo -e "  ${BLUE}mpro-sync feature/888-gestion-tests${NC}"
+    echo ""
+    exit 1
+  fi
+  
+  if [ "$result" = "ERROR_NOT_FOUND" ]; then
+    echo -e "    ${RED}✗ No branch found matching '$BRANCH_PATTERN'${NC}"
+    exit 1
+  fi
+  
+  # Show branch found
+  if [ -f "$branch_file" ]; then
+    matched_branch=$(cat "$branch_file")
+    echo -e "    ${BLUE}Found: ${YELLOW}$matched_branch${NC}"
+    REPO_BRANCHES["$key"]="$matched_branch"
+  fi
+  
+  # Show update status
+  case "$result" in
+    PULLED:*)
+      commit_count=$(echo "$result" | cut -d: -f2)
+      echo -e "    ${GREEN}✓ Pulled $commit_count commit(s)${NC}"
+      ;;
+    UP_TO_DATE)
+      echo -e "    ${GREEN}✓ Already up to date${NC}"
+      ;;
+    UPDATED)
+      echo -e "    ${GREEN}✓ Updated${NC}"
+      ;;
+    WARNING_LOCAL_CHANGES)
+      echo -e "    ${YELLOW}⚠ Checkout ok, but can't pull (local changes)${NC}"
+      ;;
+    WARNING_PULL_ISSUES)
+      echo -e "    ${YELLOW}⚠ Checkout ok, pull had issues${NC}"
+      ;;
+    *)
+      echo -e "    ${YELLOW}⚠ Unknown status${NC}"
+      ;;
+  esac
+done
+
+echo ""
+
+# Step 2: Install dependencies (optional)
+if [ "$INSTALL_DEPS" = true ]; then
+  # Identify repository types
+  lib_repo=""
+  api_repos=()
+  front_repo=""
+  
+  for key in "${ACTIVE_REPOS[@]}"; do
+    case "$key" in
+      lib-domain|*lib*)
+        lib_repo="${REPO_PATHS[$key]}"
+        ;;
+      frontend|*front*)
+        front_repo="${REPO_PATHS[$key]}"
+        ;;
+      api-*|*api*)
+        api_repos+=("${REPO_PATHS[$key]}")
+        ;;
+    esac
+  done
+  
+  # Install library dependencies
+  if [ -n "$lib_repo" ] && [ -d "$lib_repo" ]; then
+    echo -e "${BLUE}📚 Step 2: Installing library dependencies...${NC}"
+    cd "$lib_repo"
+    if [ -f "setup.py" ]; then
+      pip install -e . -q
+      echo -e "${GREEN}✓ Library installed${NC}"
+      echo ""
+    fi
+  fi
+  
+  # Install API dependencies
+  if [ ${#api_repos[@]} -gt 0 ]; then
+    echo -e "${BLUE}🔧 Step 3: Installing API dependencies...${NC}"
+    for repo in "${api_repos[@]}"; do
+      repo_name=$(basename "$repo")
+      echo -e "${YELLOW}  → $repo_name${NC}"
+      cd "$repo"
+      if [ -f "requirements.txt" ]; then
+        pip install -r requirements.txt -q
+        echo -e "    ${GREEN}✓ Dependencies installed${NC}"
+      else
+        echo -e "    ${YELLOW}⚠ No requirements.txt found${NC}"
+      fi
+    done
+    echo ""
+  fi
+  
+  # Install frontend dependencies
+  if [ -n "$front_repo" ] && [ -d "$front_repo" ]; then
+    echo -e "${BLUE}🎨 Step 4: Installing frontend dependencies...${NC}"
+    cd "$front_repo"
+    if [ -f "package.json" ]; then
+      npm install --silent
+      echo -e "${GREEN}✓ Frontend dependencies installed${NC}"
+    else
+      echo -e "${YELLOW}⚠ No package.json found${NC}"
+    fi
+    echo ""
+  fi
+else
+  echo -e "${BLUE}⏭️  Step 2: Skipping dependency installation${NC}"
+  echo -e "   ${YELLOW}Use -d or --dependencies flag to install dependencies${NC}"
+  echo ""
+fi
+
+# Final summary
+echo -e "${GREEN}✅ Synchronization completed successfully!${NC}"
+echo ""
+echo -e "${BLUE}📋 Current branch in each repository:${NC}"
+for key in "${ACTIVE_REPOS[@]}"; do
+  repo="${REPO_PATHS[$key]}"
+  cd "$repo"
+  current_branch=$(git rev-parse --abbrev-ref HEAD)
+  echo -e "  ${GREEN}✓${NC} $(printf '%-25s' "$key"): ${YELLOW}$current_branch${NC}"
+done
+
+echo ""
+echo -e "${BLUE}📋 Quick start commands:${NC}"
+echo ""
+
+# Show start commands for each repository type
+for key in "${ACTIVE_REPOS[@]}"; do
+  repo="${REPO_PATHS[$key]}"
+  case "$key" in
+    *lib*)
+      # Skip lib, no start command needed
+      ;;
+    api-patrimonial|*patrimonial*)
+      echo -e "  ${YELLOW}API Patrimonial:${NC}  cd $repo && python app.py"
+      ;;
+    api-mpro-bff|*bff*)
+      echo -e "  ${YELLOW}API MPro BFF:${NC}     cd $repo && python app.py"
+      ;;
+    frontend|*front*)
+      echo -e "  ${YELLOW}Frontend:${NC}         cd $repo && npm run dev"
+      ;;
+  esac
+done
+
+echo ""
