@@ -80,9 +80,6 @@ El script busca coincidencias inteligentes:
 ### Primera vez
 
 ```bash
-# Permisos de ejecución
-chmod +x mpro-sync
-
 # Configurar repositorios
 mpro-sync --configure
 
