@@ -131,7 +131,7 @@ configure_repos() {
       break
     fi
     
-    read -e -p "  Display name: " repo_name
+    read -e -p "  Display name [$repo_key]: " repo_name
     repo_name="${repo_name:-$repo_key}"
     
     # Change to base_dir for autocomplete to work with relative paths
@@ -824,7 +824,7 @@ if [ "$DRY_RUN" = false ]; then
     echo -e "  ${YELLOW}2)${NC} Abort (keep working on current changes)"
     echo -e "  ${YELLOW}3)${NC} Continue anyway (may cause checkout to fail)"
     echo ""
-    read -p "Choice [1/2/3]: " -n 1 -r
+    read -p "Choice: " -n 1 -r
     echo ""
     echo ""
     
