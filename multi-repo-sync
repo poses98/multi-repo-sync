@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Multi-Repository Branch Synchronization Script
+# by poses98
 # Usage: multi-repo-sync <branch-pattern> [options]
 # This script changes branches across all configured repositories using pattern matching,
 # fetches/pulls updates, and optionally installs dependencies.
@@ -90,9 +91,11 @@ EOF
 
 # Interactive configuration
 configure_repos() {
+  local version=$(get_version)
   echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
   echo -e "${BLUE}║        Multi-Repo Sync - Interactive Configuration         ║${NC}"
   echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
+  echo -e "${YELLOW}$version${NC} by ${CYAN}poses98${NC}"
   echo ""
   echo -e "${CYAN}This will create a configuration file at: ${YELLOW}$CONFIG_FILE${NC}"
   echo ""
@@ -100,7 +103,7 @@ configure_repos() {
   # Ask for base directory
   local default_base="$HOME/repos"
   echo -e "${YELLOW}Enter the base directory where your repositories are located:${NC}"
-  read -p "[$default_base]: " base_dir
+  read -e -p "[$default_base]: " base_dir
   base_dir="${base_dir:-$default_base}"
   
   # Expand ~ to $HOME
@@ -121,16 +124,24 @@ configure_repos() {
   
   while true; do
     echo -e "${BLUE}▸ Repository${NC}"
-    read -p "  Key (e.g., 'frontend', 'api', leave empty to finish): " repo_key
+    read -e -p "  Key (e.g., 'frontend', 'api', leave empty to finish): " repo_key
     
     if [ -z "$repo_key" ]; then
       echo ""
       break
     fi
     
-    read -p "  Display name: " repo_name
+    read -e -p "  Display name: " repo_name
     repo_name="${repo_name:-$repo_key}"
-    read -p "  Full path (or directory name under $base_dir): " repo_path
+    
+    # Change to base_dir for autocomplete to work with relative paths
+    if [ -d "$base_dir" ]; then
+      pushd "$base_dir" > /dev/null 2>&1
+      read -e -p "  Full path (or directory name under $base_dir): " repo_path
+      popd > /dev/null 2>&1
+    else
+      read -e -p "  Full path (or directory name under $base_dir): " repo_path
+    fi
     
     if [ -z "$repo_path" ]; then
       echo -e "  ${RED}✗ Path cannot be empty, skipping${NC}"
@@ -145,7 +156,10 @@ configure_repos() {
       repo_path="$base_dir/$repo_path"
     fi
     
-    repos+=("$repo_key:$repo_name:$repo_path")
+    # Store the path directly and add to repos list
+    new_paths["$repo_key"]="$repo_path"
+    new_order+=("$repo_key")
+    repos+=("$repo_key:$repo_name")
     echo -e "  ${GREEN}✓ Added${NC}"
     echo ""
   done
@@ -153,42 +167,32 @@ configure_repos() {
   # If no repositories were added, create example configuration
   if [ ${#repos[@]} -eq 0 ]; then
     echo -e "${YELLOW}No repositories configured. Creating example configuration...${NC}"
+    new_paths["repo1"]="$base_dir/repository-one"
+    new_paths["repo2"]="$base_dir/repository-two"
+    new_paths["repo3"]="$base_dir/repository-three"
+    new_order=("repo1" "repo2" "repo3")
     repos=(
-      "repo1:Repository One:repository-one"
-      "repo2:Repository Two:repository-two"
-      "repo3:Repository Three:repository-three"
+      "repo1:Repository One"
+      "repo2:Repository Two"
+      "repo3:Repository Three"
     )
   fi
   
+  # Now just ask for enable/disable status
   for repo_info in "${repos[@]}"; do
-    IFS=':' read -r key name default_dir <<< "$repo_info"
-    
-    # Check if it's a full path or just directory name
-    local default_path
-    if [[ "$default_dir" == /* ]]; then
-      default_path="$default_dir"
-    else
-      default_path="$base_dir/$default_dir"
-    fi
+    IFS=':' read -r key name <<< "$repo_info"
     
     echo -e "${BLUE}▸ ${name}${NC}"
-    
-    # Ask for path
-    read -p "  Path [$default_path]: " custom_path
-    custom_path="${custom_path:-$default_path}"
-    custom_path="${custom_path/#\~/$HOME}"
+    echo -e "  Path: ${CYAN}${new_paths[$key]}${NC}"
     
     # Ask if enabled
     read -p "  Enable this repository? [Y/n]: " enabled
     enabled="${enabled:-Y}"
     
     if [[ "$enabled" =~ ^[Yy]$ ]]; then
-      new_paths["$key"]="$custom_path"
       new_enabled["$key"]="true"
-      new_order+=("$key")
       echo -e "  ${GREEN}✓ Enabled${NC}"
     else
-      new_paths["$key"]="$custom_path"
       new_enabled["$key"]="false"
       echo -e "  ${YELLOW}○ Disabled${NC}"
     fi
@@ -252,9 +256,11 @@ show_config() {
   
   load_config
   
+  local version=$(get_version)
   echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║            Current Multi-Repo Sync Configuration              ║${NC}"
+  echo -e "${BLUE}║            Current Multi-Repo Sync Configuration               ║${NC}"
   echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
+  echo -e "${YELLOW}$version${NC} by ${CYAN}poses98${NC}"
   echo ""
   echo -e "${CYAN}Configuration file: ${YELLOW}$CONFIG_FILE${NC}"
   echo ""
@@ -289,9 +295,11 @@ show_status() {
     exit 1
   fi
   
+  local version=$(get_version)
   echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
   echo -e "${BLUE}║                  Repositories Status                        ║${NC}"
   echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
+  echo -e "${YELLOW}$version${NC} by ${CYAN}poses98${NC}"
   echo ""
   
   for key in "${REPO_ORDER[@]}"; do
@@ -411,15 +419,17 @@ show_help() {
 create_alias() {
   local shell_rc=""
   local alias_name="mrsync"
+  local version=$(get_version)
   
   echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
   echo -e "${BLUE}║                  Alias Installation                          ║${NC}"
   echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
+  echo -e "${YELLOW}$version${NC} by ${CYAN}poses98${NC}"
   echo ""
   
   # Ask for custom alias name
   echo -e "${CYAN}Enter the alias name you want to use:${NC}"
-  read -p "[$alias_name]: " custom_alias
+  read -e -p "[$alias_name]: " custom_alias
   alias_name="${custom_alias:-$alias_name}"
   echo ""
   
@@ -764,12 +774,14 @@ process_repo() {
 }
 
 echo ""
+local version=$(get_version)
 echo -e "${BLUE}╔════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║              Multi-Repo Sync                       ║${NC}"
 if [ "$DRY_RUN" = true ]; then
   echo -e "${BLUE}║                  [DRY-RUN MODE]                    ║${NC}"
 fi
 echo -e "${BLUE}╚════════════════════════════════════════════════════╝${NC}"
+echo -e "${YELLOW}$version${NC} by ${CYAN}poses98${NC}"
 echo ""
 echo -e "${CYAN}Branch pattern:${NC} ${YELLOW}$BRANCH_PATTERN${NC}"
 echo -e "${CYAN}Install dependencies:${NC} ${YELLOW}$([ "$INSTALL_DEPS" = true ] && echo "Yes" || echo "No")${NC}"

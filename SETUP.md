@@ -19,6 +19,7 @@ multi-repo-sync --configure
 ```
 
 This will:
+
 - Ask for the base directory where your repositories are located
 - Allow you to add all your repositories
 - Let you enable/disable specific repositories
@@ -31,11 +32,13 @@ multi-repo-sync --install
 ```
 
 The installer will:
+
 - Automatically make the script executable
 - Ask for the desired alias name (default: `mrsync`)
 - Add it to your shell configuration (~/.bashrc, ~/.zshrc, or ~/.bash_profile)
 
 You can use any name you prefer:
+
 - `mrsync` (default and recommended)
 - `sync`
 - `repo-sync`
@@ -84,12 +87,14 @@ mrsync --show-config        # View current configuration
 ## Configuration File
 
 After initial configuration, edit `~/.multi-repo-sync.conf` to:
+
 - Add custom repositories
 - Enable/disable specific repositories
 - Change repository paths
 - Modify synchronization order
 
 Example:
+
 ```bash
 # Add a custom repository
 REPO_PATHS["my-custom-lib"]="/path/to/custom/lib"
@@ -100,6 +105,7 @@ REPO_ORDER=("my-custom-lib" "backend" "frontend")
 ## Permissions
 
 The `--install` command automatically sets the script as executable:
+
 ```bash
 chmod +x /path/to/multi-repo-sync
 ```
@@ -129,6 +135,7 @@ If needed, you can do this manually before installation.
 ## Version Management
 
 Check the current version:
+
 ```bash
 mrsync --version
 ```
