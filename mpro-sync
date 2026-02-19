@@ -25,6 +25,7 @@ INSTALL_DEPS=false
 CREATE_ALIAS=false
 CONFIGURE=false
 SHOW_STATUS=false
+DRY_RUN=false
 
 # Repository configuration (will be loaded from config file)
 declare -A REPO_PATHS
@@ -189,7 +190,7 @@ EOF
   echo "# Order of synchronization (space-separated list)" >> "$CONFIG_FILE"
   echo "REPO_ORDER=(${new_order[@]})" >> "$CONFIG_FILE"
   
-  echo -e "${GREEN}✅ Configuration saved to: ${YELLOW}$CONFIG_FILE${NC}"
+  echo -e "${GREEN}✓ Configuration saved to: ${YELLOW}$CONFIG_FILE${NC}"
   echo ""
   
   # Validate paths
@@ -334,6 +335,7 @@ show_help() {
   echo -e "${YELLOW}OPTIONS:${NC}"
   echo "  -b, --branch <pattern>     Specify branch pattern explicitly"
   echo "  -d, --dependencies         Install/update dependencies (default: skip)"
+  echo "      --dry-run              Preview what would happen without making changes"
   echo "  -i, --install              Create bash alias 'mpro-sync' for this script"
   echo "  -c, --configure            Configure repository paths interactively"
   echo "  -s, --show-config          Show current configuration"
@@ -357,6 +359,7 @@ show_help() {
   echo ""
   echo -e "  ${CYAN}# Daily usage${NC}"
   echo "  mpro-sync status                      # Check current branches"
+  echo "  mpro-sync feature/888 --dry-run       # Preview what would happen"
   echo "  mpro-sync feature/888                 # Switch to feature/888* branches"
   echo "  mpro-sync develop -d                  # Switch to develop and install dependencies"
   echo "  mpro-sync -b fix/123 --dependencies   # Switch to fix/123* with dependencies"
@@ -432,7 +435,7 @@ create_alias() {
   echo "# MPro Sync Script Alias" >> "$shell_rc"
   echo "alias $alias_name='$SCRIPT_PATH'" >> "$shell_rc"
   
-  echo -e "${GREEN}✅ Alias created successfully!${NC}"
+  echo -e "${GREEN}✓ Alias created successfully!${NC}"
   echo ""
   echo -e "${BLUE}Added to: ${YELLOW}$shell_rc${NC}"
   echo -e "${CYAN}Alias name: ${YELLOW}$alias_name${NC}"
@@ -522,6 +525,10 @@ while [[ $# -gt 0 ]]; do
       INSTALL_DEPS=true
       shift
       ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
     -b|--branch)
       BRANCH_PATTERN="$2"
       shift 2
@@ -602,12 +609,25 @@ if [ -z "$BRANCH_PATTERN" ]; then
   exit 1
 fi
 
+# Check for uncommitted changes in repository
+check_uncommitted_changes() {
+  local repo_path="$1"
+  cd "$repo_path"
+  
+  # Check for uncommitted changes (staged and unstaged)
+  if ! git diff-index --quiet HEAD 2>/dev/null || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    return 0  # Has changes
+  fi
+  return 1  # No changes
+}
+
 # Process single repository (for parallel execution)
 process_repo() {
   local key="$1"
   local repo="$2"
   local pattern="$3"
   local temp_dir="$4"
+  local dry_run="$5"
   
   local output_file="$temp_dir/$key.output"
   local status_file="$temp_dir/$key.status"
@@ -644,6 +664,13 @@ process_repo() {
   
   # Save matched branch
   echo "$matched_branch" > "$branch_file"
+  
+  # If dry-run mode, just report what would happen
+  if [ "$dry_run" = "true" ]; then
+    echo "DRY_RUN_WOULD_CHECKOUT" > "$output_file"
+    echo "0" > "$status_file"
+    return 0
+  fi
   
   # Run checkout and pull in a subshell (set +e to ensure status_file is always written)
   set +e
@@ -706,11 +733,87 @@ process_repo() {
 echo ""
 echo -e "${BLUE}╔════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║                    MPro Sync                       ║${NC}"
+if [ "$DRY_RUN" = true ]; then
+  echo -e "${BLUE}║                  [DRY-RUN MODE]                    ║${NC}"
+fi
 echo -e "${BLUE}╚════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${CYAN}Branch pattern:${NC} ${YELLOW}$BRANCH_PATTERN${NC}"
 echo -e "${CYAN}Install dependencies:${NC} ${YELLOW}$([ "$INSTALL_DEPS" = true ] && echo "Yes" || echo "No")${NC}"
+if [ "$DRY_RUN" = true ]; then
+  echo -e "${CYAN}Mode:${NC} ${YELLOW}DRY-RUN (no changes will be made)${NC}"
+fi
 echo ""
+
+# Check for uncommitted changes before proceeding (skip in dry-run mode)
+if [ "$DRY_RUN" = false ]; then
+  declare -a REPOS_WITH_CHANGES
+  
+  for key in "${ACTIVE_REPOS[@]}"; do
+    repo="${REPO_PATHS[$key]}"
+    if check_uncommitted_changes "$repo"; then
+      REPOS_WITH_CHANGES+=("$key")
+    fi
+  done
+  
+  if [ ${#REPOS_WITH_CHANGES[@]} -gt 0 ]; then
+    echo -e "${YELLOW}⚠️  Uncommitted changes detected in the following repositories:${NC}"
+    echo ""
+    for key in "${REPOS_WITH_CHANGES[@]}"; do
+      repo="${REPO_PATHS[$key]}"
+      echo -e "  ${YELLOW}○${NC} $key"
+      cd "$repo"
+      
+      # Show brief status
+      modified=$(git diff --name-only | wc -l)
+      staged=$(git diff --cached --name-only | wc -l)
+      untracked=$(git ls-files --others --exclude-standard | wc -l)
+      
+      [ "$modified" -gt 0 ] && echo -e "    ${CYAN}Modified files: $modified${NC}"
+      [ "$staged" -gt 0 ] && echo -e "    ${CYAN}Staged files: $staged${NC}"
+      [ "$untracked" -gt 0 ] && echo -e "    ${CYAN}Untracked files: $untracked${NC}"
+    done
+    echo ""
+    echo -e "${CYAN}What would you like to do?${NC}"
+    echo -e "  ${YELLOW}1)${NC} Stash changes and continue"
+    echo -e "  ${YELLOW}2)${NC} Abort (keep working on current changes)"
+    echo -e "  ${YELLOW}3)${NC} Continue anyway (may cause checkout to fail)"
+    echo ""
+    read -p "Choice [1/2/3]: " -n 1 -r
+    echo ""
+    echo ""
+    
+    case $REPLY in
+      1)
+        echo -e "${CYAN}Stashing changes...${NC}"
+        for key in "${REPOS_WITH_CHANGES[@]}"; do
+          repo="${REPO_PATHS[$key]}"
+          cd "$repo"
+          current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+          stash_msg="mpro-sync: auto-stash before switching to $BRANCH_PATTERN (from $current_branch)"
+          git stash push -u -m "$stash_msg" 2>&1 | grep -v "No local changes to save" || true
+          echo -e "  ${GREEN}✓${NC} Stashed $key"
+        done
+        echo ""
+        echo -e "${GREEN}✓ All changes stashed${NC}"
+        echo -e "${CYAN}💡 To restore: ${YELLOW}git stash pop${NC} in each repository"
+        echo ""
+        ;;
+      2)
+        echo -e "${BLUE}Aborted. No changes made.${NC}"
+        exit 0
+        ;;
+      3)
+        echo -e "${YELLOW}⚠️  Continuing with uncommitted changes...${NC}"
+        echo ""
+        ;;
+      *)
+        echo -e "${RED}Invalid choice. Aborting.${NC}"
+        exit 1
+        ;;
+    esac
+  fi
+fi
 
 # Step 1: Checkout and fetch/pull all repositories (in parallel)
 echo -e "${BLUE}📦 Step 1: Updating repositories (parallel mode)...${NC}"
@@ -731,10 +834,14 @@ for key in "${ACTIVE_REPOS[@]}"; do
 done
 
 # Launch all repository updates in parallel
-echo -e "${CYAN}Starting parallel updates...${NC}"
+if [ "$DRY_RUN" = true ]; then
+  echo -e "${CYAN}Checking what would happen...${NC}"
+else
+  echo -e "${CYAN}Starting parallel updates...${NC}"
+fi
 for key in "${ACTIVE_REPOS[@]}"; do
   repo="${REPO_PATHS[$key]}"
-  process_repo "$key" "$repo" "$BRANCH_PATTERN" "$TEMP_DIR" &
+  process_repo "$key" "$repo" "$BRANCH_PATTERN" "$TEMP_DIR" "$DRY_RUN" &
 done
 
 # Wait for all background jobs to complete
@@ -825,6 +932,10 @@ for key in "${ACTIVE_REPOS[@]}"; do
   
   # Show update status
   case "$result" in
+    DRY_RUN_WOULD_CHECKOUT)
+      echo -e "    ${CYAN}→ Would checkout and pull${NC}"
+      SUCCESSFUL_REPOS+=("$key")
+      ;;
     PULLED:*)
       commit_count=$(echo "$result" | cut -d: -f2)
       echo -e "    ${GREEN}✓ Pulled $commit_count commit(s)${NC}"
@@ -870,7 +981,7 @@ fi
 echo ""
 
 # Step 2: Install dependencies (optional)
-if [ "$INSTALL_DEPS" = true ]; then
+if [ "$INSTALL_DEPS" = true ] && [ "$DRY_RUN" = false ]; then
   # Identify repository types
   lib_repo=""
   api_repos=()
@@ -930,17 +1041,25 @@ if [ "$INSTALL_DEPS" = true ]; then
     fi
     echo ""
   fi
-else
-  echo -e "${BLUE}⏭️  Step 2: Skipping dependency installation${NC}"
-  echo -e "   ${YELLOW}Use -d or --dependencies flag to install dependencies${NC}"
+elif [ "$INSTALL_DEPS" = true ] && [ "$DRY_RUN" = true ]; then
+  echo -e "${CYAN}💡 Would install dependencies (skipped in dry-run mode)${NC}"
   echo ""
 fi
 
 # Final summary
-if [ ${#FAILED_REPOS[@]} -eq 0 ]; then
-  echo -e "${GREEN}✅ Synchronization completed successfully!${NC}"
+if [ "$DRY_RUN" = true ]; then
+  if [ ${#FAILED_REPOS[@]} -eq 0 ]; then
+    echo -e "${CYAN}✓ Dry-run completed successfully!${NC}"
+    echo -e "${CYAN}  All repositories would be updated. Run without --dry-run to apply changes.${NC}"
+  else
+    echo -e "${YELLOW}⚠️  Dry-run completed with some warnings${NC}"
+  fi
 else
-  echo -e "${YELLOW}⚠️  Synchronization completed with some warnings${NC}"
+  if [ ${#FAILED_REPOS[@]} -eq 0 ]; then
+    echo -e "${GREEN}✓ Synchronization completed successfully!${NC}"
+  else
+    echo -e "${YELLOW}⚠️  Synchronization completed with some warnings${NC}"
+  fi
 fi
 echo ""
 
@@ -978,28 +1097,5 @@ if [ ${#FAILED_REPOS[@]} -gt 0 ]; then
     echo -e "   ${BLUE}Example:${NC} mpro-sync feature/556-bloqueos"
   fi
 fi
-
-echo ""
-echo -e "${BLUE}📋 Quick start commands:${NC}"
-echo ""
-
-# Show start commands for each repository type
-for key in "${ACTIVE_REPOS[@]}"; do
-  repo="${REPO_PATHS[$key]}"
-  case "$key" in
-    *lib*)
-      # Skip lib, no start command needed
-      ;;
-    api-patrimonial|*patrimonial*)
-      echo -e "  ${YELLOW}API Patrimonial:${NC}  cd $repo && python app.py"
-      ;;
-    api-mpro-bff|*bff*)
-      echo -e "  ${YELLOW}API MPro BFF:${NC}     cd $repo && python app.py"
-      ;;
-    frontend|*front*)
-      echo -e "  ${YELLOW}Frontend:${NC}         cd $repo && npm run dev"
-      ;;
-  esac
-done
 
 echo ""
