@@ -1,15 +1,16 @@
 #!/bin/bash
 
-# MPro Branch Synchronization Script
-# Usage: mpro-sync <branch-pattern> [options]
-# This script changes branches across all MPro repositories using pattern matching,
+# Multi-Repository Branch Synchronization Script
+# Usage: multi-repo-sync <branch-pattern> [options]
+# This script changes branches across all configured repositories using pattern matching,
 # fetches/pulls updates, and optionally installs dependencies.
 
 set -e  # Exit on error
 
 # Script configuration
 SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
-CONFIG_FILE="$HOME/.mpro-sync.conf"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+CONFIG_FILE="$HOME/.multi-repo-sync.conf"
 
 # Colors for output
 RED='\033[0;31m'
@@ -26,6 +27,7 @@ CREATE_ALIAS=false
 CONFIGURE=false
 SHOW_STATUS=false
 DRY_RUN=false
+SHOW_VERSION=false
 
 # Repository configuration (will be loaded from config file)
 declare -A REPO_PATHS
@@ -41,41 +43,63 @@ load_config() {
   return 1
 }
 
-# Create default configuration
+# Get version from git tags
+get_version() {
+  if [ -d "$SCRIPT_DIR/.git" ]; then
+    # Try to get the latest tag
+    local tag=$(cd "$SCRIPT_DIR" && git describe --tags --abbrev=0 2>/dev/null)
+    if [ -n "$tag" ]; then
+      echo "$tag"
+    else
+      # If no tags, use commit hash
+      echo "dev-$(cd "$SCRIPT_DIR" && git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+    fi
+  else
+    echo "unknown"
+  fi
+}
+
+# Show version
+show_version() {
+  local version=$(get_version)
+  echo -e "${BLUE}Multi-Repo Sync${NC} version ${YELLOW}$version${NC}"
+  exit 0
+}
+
+# Create default configuration with generic example
 create_default_config() {
   cat > "$CONFIG_FILE" << 'EOF'
-# MPro Sync Configuration File
+# Multi-Repo Sync Configuration File
 # This file defines the repositories to synchronize
 
 # Repository paths (key=name, value=absolute path)
-REPO_PATHS["lib-domain"]="$HOME/mpro/appmutuactivostech-lib-domain-patrimonial"
-REPO_PATHS["api-patrimonial"]="$HOME/mpro/appmutuactivostech-api-patrimonial"
-REPO_PATHS["api-mpro-bff"]="$HOME/mpro/appmutuactivostech-api-mpro-bff"
-REPO_PATHS["frontend"]="$HOME/mpro/appmutuactivostech-front-mpro"
+# Example: REPO_PATHS["repo1"]="$HOME/projects/repo1"
+REPO_PATHS["repo1"]="$HOME/repos/repository-one"
+REPO_PATHS["repo2"]="$HOME/repos/repository-two"
+REPO_PATHS["repo3"]="$HOME/repos/repository-three"
 
 # Enable/disable repositories (true/false)
-REPO_ENABLED["lib-domain"]=true
-REPO_ENABLED["api-patrimonial"]=true
-REPO_ENABLED["api-mpro-bff"]=true
-REPO_ENABLED["frontend"]=true
+REPO_ENABLED["repo1"]=true
+REPO_ENABLED["repo2"]=true
+REPO_ENABLED["repo3"]=true
 
 # Order of synchronization (space-separated list)
-REPO_ORDER=("lib-domain" "api-patrimonial" "api-mpro-bff" "frontend")
+REPO_ORDER=("repo1" "repo2" "repo3")
 EOF
 }
 
 # Interactive configuration
 configure_repos() {
   echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║           MPro Sync - Interactive Configuration            ║${NC}"
+  echo -e "${BLUE}║        Multi-Repo Sync - Interactive Configuration         ║${NC}"
   echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
   echo ""
   echo -e "${CYAN}This will create a configuration file at: ${YELLOW}$CONFIG_FILE${NC}"
   echo ""
   
   # Ask for base directory
-  local default_base="$HOME/mpro"
-  echo -e "${YELLOW}Enter the base directory where MPro repositories are located:${NC}"
+  local default_base="$HOME/repos"
+  echo -e "${YELLOW}Enter the base directory where your repositories are located:${NC}"
   read -p "[$default_base]: " base_dir
   base_dir="${base_dir:-$default_base}"
   
@@ -87,50 +111,54 @@ configure_repos() {
   echo -e "${YELLOW}(Press Enter to accept default, or type custom path)${NC}"
   echo ""
   
-  # Configuration for each repository (standard MPro repos)
-  local repos=(
-    "lib-domain:Library Domain:appmutuactivostech-lib-domain-patrimonial"
-    "api-patrimonial:API Patrimonial:appmutuactivostech-api-patrimonial"
-    "api-mpro-bff:API MPro BFF:appmutuactivostech-api-mpro-bff"
-    "frontend:Frontend:appmutuactivostech-front-mpro"
-  )
-  
-  # Ask if user wants to add custom repositories
-  echo -e "${CYAN}Standard MPro repositories detected.${NC}"
-  read -p "Do you want to add custom repositories? (y/N): " add_custom
-  echo ""
-  
-  if [[ "$add_custom" =~ ^[Yy]$ ]]; then
-    echo -e "${YELLOW}Enter custom repositories (leave key empty to finish):${NC}"
-    while true; do
-      echo -e "${BLUE}▸ Custom Repository${NC}"
-      read -p "  Key (e.g., 'custom-lib', leave empty to finish): " custom_key
-      
-      if [ -z "$custom_key" ]; then
-        echo ""
-        break
-      fi
-      
-      read -p "  Display name: " custom_name
-      custom_name="${custom_name:-$custom_key}"
-      read -p "  Full path: " custom_path
-      
-      if [ -z "$custom_path" ]; then
-        echo -e "  ${RED}✗ Path cannot be empty, skipping${NC}"
-        echo ""
-        continue
-      fi
-      
-      custom_path="${custom_path/#\~/$HOME}"
-      repos+=("$custom_key:$custom_name:$custom_path")
-      echo -e "  ${GREEN}✓ Added${NC}"
-      echo ""
-    done
-  fi
+  echo -e "${YELLOW}Enter repositories (leave key empty to finish):${NC}"
   
   declare -A new_paths
   declare -A new_enabled
   declare -a new_order
+  
+  local repos=()
+  
+  while true; do
+    echo -e "${BLUE}▸ Repository${NC}"
+    read -p "  Key (e.g., 'frontend', 'api', leave empty to finish): " repo_key
+    
+    if [ -z "$repo_key" ]; then
+      echo ""
+      break
+    fi
+    
+    read -p "  Display name: " repo_name
+    repo_name="${repo_name:-$repo_key}"
+    read -p "  Full path (or directory name under $base_dir): " repo_path
+    
+    if [ -z "$repo_path" ]; then
+      echo -e "  ${RED}✗ Path cannot be empty, skipping${NC}"
+      echo ""
+      continue
+    fi
+    
+    # Check if it's a full path or relative
+    if [[ "$repo_path" == /* ]]; then
+      repo_path="${repo_path/#\~/$HOME}"
+    else
+      repo_path="$base_dir/$repo_path"
+    fi
+    
+    repos+=("$repo_key:$repo_name:$repo_path")
+    echo -e "  ${GREEN}✓ Added${NC}"
+    echo ""
+  done
+  
+  # If no repositories were added, create example configuration
+  if [ ${#repos[@]} -eq 0 ]; then
+    echo -e "${YELLOW}No repositories configured. Creating example configuration...${NC}"
+    repos=(
+      "repo1:Repository One:repository-one"
+      "repo2:Repository Two:repository-two"
+      "repo3:Repository Three:repository-three"
+    )
+  fi
   
   for repo_info in "${repos[@]}"; do
     IFS=':' read -r key name default_dir <<< "$repo_info"
@@ -169,7 +197,7 @@ configure_repos() {
   
   # Write configuration file
   cat > "$CONFIG_FILE" << EOF
-# MPro Sync Configuration File
+# Multi-Repo Sync Configuration File
 # Generated on $(date)
 # Edit this file to customize repository paths and settings
 
@@ -218,14 +246,14 @@ EOF
 show_config() {
   if [ ! -f "$CONFIG_FILE" ]; then
     echo -e "${RED}❌ Configuration file not found: $CONFIG_FILE${NC}"
-    echo -e "${YELLOW}Run: mpro-sync --configure${NC}"
+    echo -e "${YELLOW}Run: multi-repo-sync --configure${NC}"
     return 1
   fi
   
   load_config
   
   echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║              Current MPro Sync Configuration                   ║${NC}"
+  echo -e "${BLUE}║            Current Multi-Repo Sync Configuration              ║${NC}"
   echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
   echo ""
   echo -e "${CYAN}Configuration file: ${YELLOW}$CONFIG_FILE${NC}"
@@ -257,12 +285,12 @@ show_config() {
 show_status() {
   if ! load_config; then
     echo -e "${RED}❌ Configuration file not found: $CONFIG_FILE${NC}"
-    echo -e "${YELLOW}Run: mpro-sync --configure${NC}"
+    echo -e "${YELLOW}Run: multi-repo-sync --configure${NC}"
     exit 1
   fi
   
   echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║                  MPro Repositories Status                      ║${NC}"
+  echo -e "${BLUE}║                  Repositories Status                        ║${NC}"
   echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
   echo ""
   
@@ -316,15 +344,15 @@ show_status() {
 
 # Show help menu
 show_help() {
-  echo -e "${BLUE}MPro Branch Synchronization Script${NC}"
+  echo -e "${BLUE}Multi-Repository Branch Synchronization Script${NC}"
   echo ""
   echo -e "${YELLOW}USAGE:${NC}"
-  echo "  mpro-sync <branch-pattern> [options]"
-  echo "  mpro-sync [options] -b <branch-pattern>"
-  echo "  mpro-sync --status"
+  echo "  multi-repo-sync <branch-pattern> [options]"
+  echo "  multi-repo-sync [options] -b <branch-pattern>"
+  echo "  multi-repo-sync --status"
   echo ""
   echo -e "${YELLOW}DESCRIPTION:${NC}"
-  echo "  Synchronizes all configured MPro repositories to branches matching the given pattern."
+  echo "  Synchronizes all configured repositories to branches matching the given pattern."
   echo "  The script searches for branches that start with the pattern (e.g., 'feature/888')"
   echo "  and automatically handles different suffixes in each repository."
   echo ""
@@ -336,43 +364,45 @@ show_help() {
   echo "  -b, --branch <pattern>     Specify branch pattern explicitly"
   echo "  -d, --dependencies         Install/update dependencies (default: skip)"
   echo "      --dry-run              Preview what would happen without making changes"
-  echo "  -i, --install              Create bash alias 'mpro-sync' for this script"
+  echo "  -i, --install              Create bash alias for this script"
   echo "  -c, --configure            Configure repository paths interactively"
   echo "  -s, --show-config          Show current configuration"
   echo "      --status               Show current branch status for all repositories"
+  echo "  -v, --version              Show version information"
   echo "  -h, --help                 Show this help message"
   echo ""
   echo -e "${YELLOW}CONFIGURATION:${NC}"
-  echo -e "  Configuration file: ${CYAN}~/.mpro-sync.conf${NC}"
+  echo -e "  Configuration file: ${CYAN}~/.multi-repo-sync.conf${NC}"
   echo ""
   echo "  The configuration file defines:"
   echo "  - Repository paths (can be anywhere in your system)"
   echo "  - Which repositories to synchronize"
   echo "  - Order of synchronization"
   echo ""
-  echo -e "  ${CYAN}To add custom repositories:${NC} Edit the config file or run ${YELLOW}mpro-sync --configure${NC}"
+  echo -e "  ${CYAN}To add custom repositories:${NC} Edit the config file or run ${YELLOW}multi-repo-sync --configure${NC}"
   echo ""
   echo -e "${YELLOW}EXAMPLES:${NC}"
   echo -e "  ${CYAN}# First time setup${NC}"
-  echo "  mpro-sync --configure                 # Configure repository paths"
-  echo "  mpro-sync --install                   # Create bash alias"
+  echo "  multi-repo-sync --configure           # Configure repository paths"
+  echo "  multi-repo-sync --install             # Create bash alias (e.g., mrsync)"
   echo ""
   echo -e "  ${CYAN}# Daily usage${NC}"
-  echo "  mpro-sync status                      # Check current branches"
-  echo "  mpro-sync feature/888 --dry-run       # Preview what would happen"
-  echo "  mpro-sync feature/888                 # Switch to feature/888* branches"
-  echo "  mpro-sync develop -d                  # Switch to develop and install dependencies"
-  echo "  mpro-sync -b fix/123 --dependencies   # Switch to fix/123* with dependencies"
+  echo "  mrsync status                         # Check current branches"
+  echo "  mrsync feature/888 --dry-run          # Preview what would happen"
+  echo "  mrsync feature/888                    # Switch to feature/888* branches"
+  echo "  mrsync develop -d                     # Switch to develop and install dependencies"
+  echo "  mrsync -b fix/123 --dependencies      # Switch to fix/123* with dependencies"
   echo ""
   echo -e "  ${CYAN}# Configuration management${NC}"
-  echo "  mpro-sync --show-config               # View current configuration"
-  echo "  mpro-sync --configure                 # Reconfigure paths"
+  echo "  mrsync --show-config                  # View current configuration"
+  echo "  mrsync --configure                    # Reconfigure paths"
+  echo "  mrsync --version                      # Show version"
   echo ""
   echo -e "${YELLOW}SHARING WITH TEAMMATES:${NC}"
   echo "  1. Share this script file"
-  echo "  2. Each person runs: mpro-sync --configure"
+  echo "  2. Each person runs: multi-repo-sync --configure"
   echo "  3. Configure their local repository paths"
-  echo "  4. Create alias: mpro-sync --install"
+  echo "  4. Create alias: multi-repo-sync --install"
   echo ""
   exit 0
 }
@@ -380,7 +410,7 @@ show_help() {
 # Create bash alias
 create_alias() {
   local shell_rc=""
-  local alias_name="mpro-sync"
+  local alias_name="mrsync"
   
   echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
   echo -e "${BLUE}║                  Alias Installation                          ║${NC}"
@@ -432,7 +462,7 @@ create_alias() {
   
   # Add new alias
   echo "" >> "$shell_rc"
-  echo "# MPro Sync Script Alias" >> "$shell_rc"
+  echo "# Multi-Repo Sync Script Alias" >> "$shell_rc"
   echo "alias $alias_name='$SCRIPT_PATH'" >> "$shell_rc"
   
   echo -e "${GREEN}✓ Alias created successfully!${NC}"
@@ -504,6 +534,9 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     -h|--help)
       show_help
+      ;;
+    -v|--version)
+      show_version
       ;;
     -i|--install)
       CREATE_ALIAS=true
@@ -592,7 +625,7 @@ done
 
 if [ ${#ACTIVE_REPOS[@]} -eq 0 ]; then
   echo -e "${RED}❌ No repositories enabled in configuration${NC}"
-  echo -e "${YELLOW}Run: mpro-sync --configure${NC}"
+  echo -e "${YELLOW}Run: multi-repo-sync --configure${NC}"
   exit 1
 fi
 
@@ -604,7 +637,7 @@ fi
 # Validation
 if [ -z "$BRANCH_PATTERN" ]; then
   echo -e "${RED}❌ Error: Branch pattern not provided${NC}"
-  echo "Usage: mpro-sync <branch-pattern> [options]"
+  echo "Usage: multi-repo-sync <branch-pattern> [options]"
   echo "Use -h or --help for more information"
   exit 1
 fi
@@ -732,7 +765,7 @@ process_repo() {
 
 echo ""
 echo -e "${BLUE}╔════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║                    MPro Sync                       ║${NC}"
+echo -e "${BLUE}║              Multi-Repo Sync                       ║${NC}"
 if [ "$DRY_RUN" = true ]; then
   echo -e "${BLUE}║                  [DRY-RUN MODE]                    ║${NC}"
 fi
@@ -790,7 +823,7 @@ if [ "$DRY_RUN" = false ]; then
           repo="${REPO_PATHS[$key]}"
           cd "$repo"
           current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-          stash_msg="mpro-sync: auto-stash before switching to $BRANCH_PATTERN (from $current_branch)"
+          stash_msg="multi-repo-sync: auto-stash before switching to $BRANCH_PATTERN (from $current_branch)"
           git stash push -u -m "$stash_msg" 2>&1 | grep -v "No local changes to save" || true
           echo -e "  ${GREEN}✓${NC} Stashed $key"
         done
@@ -828,7 +861,7 @@ for key in "${ACTIVE_REPOS[@]}"; do
   repo="${REPO_PATHS[$key]}"
   if [ ! -d "$repo" ]; then
     echo -e "${RED}❌ Repository not found: $repo${NC}"
-    echo -e "${YELLOW}   Configure the correct path with: mpro-sync --configure${NC}"
+    echo -e "${YELLOW}   Configure the correct path with: multi-repo-sync --configure${NC}"
     exit 1
   fi
 done
@@ -1094,7 +1127,7 @@ if [ ${#FAILED_REPOS[@]} -gt 0 ]; then
   if [ "$has_multiple_branches" = true ]; then
     echo ""
     echo -e "${CYAN}💡 Tip:${NC} Use a more specific branch pattern or the full branch name."
-    echo -e "   ${BLUE}Example:${NC} mpro-sync feature/556-bloqueos"
+    echo -e "   ${BLUE}Example:${NC} mrsync feature/556-my-feature"
   fi
 fi
 

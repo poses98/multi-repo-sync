@@ -1,0 +1,22 @@
+# User configuration files
+.multi-repo-sync.conf
+*.conf
+
+# Backup files
+*.bak
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+.tmp/
