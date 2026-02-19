@@ -109,6 +109,9 @@ configure_repos() {
   # Expand ~ to $HOME
   base_dir="${base_dir/#\~/$HOME}"
   
+  # Remove trailing slashes for consistent path construction
+  base_dir="${base_dir%/}"
+  
   echo ""
   echo -e "${CYAN}Configuring repositories...${NC}"
   echo -e "${YELLOW}(Press Enter to accept default, or type custom path)${NC}"
@@ -153,6 +156,9 @@ configure_repos() {
     if [[ "$repo_path" == /* ]]; then
       repo_path="${repo_path/#\~/$HOME}"
     else
+      # Remove leading/trailing slashes from relative path before concatenating
+      repo_path="${repo_path#/}"
+      repo_path="${repo_path%/}"
       repo_path="$base_dir/$repo_path"
     fi
     
