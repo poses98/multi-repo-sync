@@ -774,7 +774,7 @@ process_repo() {
 }
 
 echo ""
-local version=$(get_version)
+version=$(get_version)
 echo -e "${BLUE}╔════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║              Multi-Repo Sync                       ║${NC}"
 if [ "$DRY_RUN" = true ]; then
